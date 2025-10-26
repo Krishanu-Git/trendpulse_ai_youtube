@@ -14,3 +14,6 @@ stopwordsiso
 mlflow
 pytest
 flake8
+praw
+# For handling Errors
+setuptools
