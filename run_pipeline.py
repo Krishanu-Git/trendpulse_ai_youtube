@@ -22,8 +22,8 @@ def run_daily_ingestion():
         if not api_key or not mongo_uri:
             raise ValueError("API Key or MongoDB URI is not configured.")
 
-        collector = YouTubeCollector(api_key) # Assuming collector is updated to accept the key
-        db_handler = MongoHandler(mongo_uri, MONGO_DB_NAME) # Assuming handler is updated
+        collector = YouTubeCollector() # Assuming collector is updated to accept the key
+        db_handler = MongoHandler() # Assuming handler is updated
         pipeline = [
             {
                 "$group": {
