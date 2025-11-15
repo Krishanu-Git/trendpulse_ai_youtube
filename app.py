@@ -700,12 +700,17 @@ if analyze_button and keyword_input:
                 if df_tr_nonull.empty:
                     st.info("Combined trend not available: no valid timestamps in combined data.")
                 else:
+                    # Keep existing behavior: try get_trends_over_time then fallback to daily aggregation
                     combined_trends = get_trends_over_time(df_tr_nonull)
-                    if combined_trends is not None and not combined_trends.empty:
-                        fig_comb = px.line(combined_trends, x="comment_published_at", y="count", title="Combined Comment Volume per Day")
-                        st.plotly_chart(fig_comb, use_container_width=True)
-                    else:
-                        st.info("Combined trend calculation returned no rows.")
+                    if combined_trends is None or combined_trends.empty:
+                        # fallback to daily counts
+                        tmp = df_tr_nonull.copy()
+                        tmp["date"] = tmp["comment_published_at"].dt.date
+                        combined_trends = tmp.groupby("date").size().reset_index(name="count")
+                        # normalize column name to match expected x axis
+                        combined_trends = combined_trends.rename(columns={"date": "comment_published_at"})
+                    fig_comb = px.line(combined_trends, x="comment_published_at", y="count", title="Combined Comment Volume per Day", markers=True)
+                    st.plotly_chart(fig_comb, use_container_width=True)
             except Exception as e:
                 st.info("Combined trends unavailable: " + str(e))
 
@@ -720,11 +725,12 @@ if analyze_button and keyword_input:
                         st.info("No YouTube timestamps available to plot trends.")
                     else:
                         y_tr = get_trends_over_time(ydf_nonull)
-                        if y_tr is not None and not y_tr.empty:
-                            fig_y = px.line(y_tr, x="comment_published_at", y="count", title="YouTube")
-                            st.plotly_chart(fig_y, use_container_width=True)
-                        else:
-                            st.info("No YouTube trend data available.")
+                        if y_tr is None or y_tr.empty:
+                            tmp = ydf_nonull.copy()
+                            tmp["date"] = tmp["comment_published_at"].dt.date
+                            y_tr = tmp.groupby("date").size().reset_index(name="count").rename(columns={"date": "comment_published_at"})
+                        fig_y = px.line(y_tr, x="comment_published_at", y="count", title="YouTube", markers=True)
+                        st.plotly_chart(fig_y, use_container_width=True)
                 except Exception as e:
                     st.info("YouTube trends failed: " + str(e))
 
@@ -738,93 +744,14 @@ if analyze_button and keyword_input:
                         st.info("No Reddit timestamps available to plot trends.")
                     else:
                         r_tr = get_trends_over_time(rdf_nonull)
-                        if r_tr is not None and not r_tr.empty:
-                            fig_r = px.line(r_tr, x="comment_published_at", y="count", title="Reddit")
-                            st.plotly_chart(fig_r, use_container_width=True)
-                        else:
-                            st.info("No Reddit trend data available.")
+                        if r_tr is None or r_tr.empty:
+                            tmp = rdf_nonull.copy()
+                            tmp["date"] = tmp["comment_published_at"].dt.date
+                            r_tr = tmp.groupby("date").size().reset_index(name="count").rename(columns={"date": "comment_published_at"})
+                        fig_r = px.line(r_tr, x="comment_published_at", y="count", title="Reddit", markers=True)
+                        st.plotly_chart(fig_r, use_container_width=True)
                 except Exception as e:
                     st.info("Reddit trends failed: " + str(e))
-
-            # ---------- New: Side-by-side small line graphs above Top Content ----------
-            st.markdown("---")
-            st.subheader("Small Trend Comparison (Recent)")
-            try:
-                # Use last N days window (e.g., 30 days) for small charts
-                days_window = 30
-                # prepare combined daily
-                df_days = _ensure_timestamp_col(df.copy()).dropna(subset=["comment_published_at"]).copy()
-                if not df_days.empty:
-                    df_days["date"] = df_days["comment_published_at"].dt.date
-                    comb_daily = df_days.groupby("date").size().reset_index(name="count")
-                else:
-                    comb_daily = pd.DataFrame(columns=["date", "count"])
-
-                # youtube daily
-                ydf_days = df[df["source"] == "youtube"].copy()
-                ydf_days = _ensure_timestamp_col(ydf_days).dropna(subset=["comment_published_at"]).copy()
-                if not ydf_days.empty:
-                    ydf_days["date"] = ydf_days["comment_published_at"].dt.date
-                    y_daily = ydf_days.groupby("date").size().reset_index(name="count")
-                else:
-                    y_daily = pd.DataFrame(columns=["date", "count"])
-
-                # reddit daily
-                rdf_days = df[df["source"] == "reddit"].copy()
-                rdf_days = _ensure_timestamp_col(rdf_days).dropna(subset=["comment_published_at"]).copy()
-                if not rdf_days.empty:
-                    rdf_days["date"] = rdf_days["comment_published_at"].dt.date
-                    r_daily = rdf_days.groupby("date").size().reset_index(name="count")
-                else:
-                    r_daily = pd.DataFrame(columns=["date", "count"])
-
-                # restrict to recent window if possible
-                if not comb_daily.empty:
-                    max_date = comb_daily["date"].max()
-                elif not y_daily.empty:
-                    max_date = y_daily["date"].max()
-                elif not r_daily.empty:
-                    max_date = r_daily["date"].max()
-                else:
-                    max_date = None
-
-                if max_date is not None:
-                    import datetime as _dt
-                    min_date = max_date - _dt.timedelta(days=days_window)
-                    if not comb_daily.empty:
-                        comb_daily = comb_daily[comb_daily["date"] >= min_date]
-                    if not y_daily.empty:
-                        y_daily = y_daily[y_daily["date"] >= min_date]
-                    if not r_daily.empty:
-                        r_daily = r_daily[r_daily["date"] >= min_date]
-
-                scol1, scol2, scol3 = st.columns(3)
-                with scol1:
-                    st.markdown("**Combined (last 30 days)**")
-                    if not comb_daily.empty:
-                        fig_c_small = px.line(comb_daily, x="date", y="count", title="", markers=True)
-                        fig_c_small.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=250)
-                        st.plotly_chart(fig_c_small, use_container_width=True)
-                    else:
-                        st.info("No combined data for small chart.")
-                with scol2:
-                    st.markdown("**YouTube (last 30 days)**")
-                    if not y_daily.empty:
-                        fig_y_small = px.line(y_daily, x="date", y="count", title="", markers=True)
-                        fig_y_small.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=250)
-                        st.plotly_chart(fig_y_small, use_container_width=True)
-                    else:
-                        st.info("No YouTube data for small chart.")
-                with scol3:
-                    st.markdown("**Reddit (last 30 days)**")
-                    if not r_daily.empty:
-                        fig_r_small = px.line(r_daily, x="date", y="count", title="", markers=True)
-                        fig_r_small.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=250)
-                        st.plotly_chart(fig_r_small, use_container_width=True)
-                    else:
-                        st.info("No Reddit data for small chart.")
-            except Exception as e:
-                st.info("Could not generate small trend comparison: " + str(e))
 
             st.subheader("Top Content (YouTube videos + Reddit posts)")
             try:
