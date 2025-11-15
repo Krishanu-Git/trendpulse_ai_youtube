@@ -7,8 +7,6 @@ MONGO_URI = "mongodb+srv://krishanudas2611_db_user:M3edoMn0ds9P6QnJ@youtubeclust
 MONGO_DB_NAME = "trendpulse_youtube_db"
 
 # --- Reddit Integration Toggle ---
-
-
 REDDIT_CLIENT_ID = "6kmtx9bQVTVSNimfzoT1jQ"
 REDDIT_CLIENT_SECRET = "55Zb7vWrJBpFn-cJ1k-HL5FMakgCUw"
 REDDIT_USER_AGENT = "Week1DataCollection/1.0 by KitchenAd954"

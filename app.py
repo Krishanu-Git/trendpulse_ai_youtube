@@ -102,7 +102,7 @@ def _normalize_reddit_posts(posts_df: pd.DataFrame) -> pd.DataFrame:
     df["selftext"] = df.get("selftext", df.get("self_text", ""))
     df["subreddit"] = df.get("subreddit", df.get("subreddit_name_prefixed", df.get("subreddit", None)))
     df["permalink"] = df.get("permalink", df.get("url", None))
-    df["created_utc"] = df.get("created_utc", df.get("created_at", df.get("created", None)))
+    df["created_utc"] = df.get("comment_published_at", df.get("created_at", df.get("created", None)))
     df["author"] = df.get("author", None)
     df["score"] = df.get("score", df.get("ups", None))
     df["num_comments"] = df.get("num_comments", df.get("num_comments", None))
@@ -119,7 +119,7 @@ def _normalize_reddit_comments(comments_df: pd.DataFrame) -> pd.DataFrame:
         df["comment_text"] = df["text"]
     else:
         df["comment_text"] = df.get("selftext", df.get("comment_text", ""))
-    df["created_utc"] = df.get("created_utc", df.get("created_at", df.get("created", None)))
+    df["created_utc"] = df.get("comment_published_at", df.get("created_at", df.get("created", None)))
     df["submission_id"] = df.get("submission_id", df.get("link_id", df.get("post_id", None)))
     df["id"] = df.get("id")
     df["parent_id"] = df.get("parent_id")
@@ -315,7 +315,7 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
         if not posts_df.empty:
             temp = posts_df.copy()
             temp["comment_text"] = temp.get("selftext", "").fillna("") + " " + temp.get("title", "").fillna("")
-            temp["comment_published_at"] = temp.get("created_utc")
+            temp["comment_published_at"] = temp.get("comment_published_at")
             temp["language"] = temp["comment_text"].apply(lambda t: detect_language(t) if t else "unknown")
             temp["cleaned_text"] = temp.apply(lambda r: clean_text_multilingual(r["comment_text"], r["language"]), axis=1)
             temp["sentiment"] = temp.apply(lambda r: get_sentiment(r["cleaned_text"]) if r["language"] == "en" else "N/A (Non-English)", axis=1)
@@ -446,17 +446,17 @@ with st.sidebar:
     st.subheader("🔗 Reddit Controls (live fetch)")
     default_enabled = getattr(config, "REDDIT_ENABLED", False)
     default_post_limit = getattr(config, "REDDIT_POST_LIMIT", 30)
-    default_subs = getattr(config, "REDDIT_SUBREDDITS", ["technology"])
+    # default_subs = getattr(config, "REDDIT_SUBREDDITS", ["technology"])
 
     reddit_enabled_ui = st.checkbox("Enable Reddit (override config)", value=default_enabled)
     reddit_post_limit = st.number_input("Reddit posts to fetch per subreddit/search", min_value=1, max_value=500, value=default_post_limit, step=1)
     reddit_comment_limit = st.number_input("Comments per reddit post to fetch", min_value=1, max_value=500, value=100, step=1)
-    reddit_mode = st.radio("Reddit fetch mode", ("Configured subreddits", "Search r/all for keyword"))
-    if reddit_mode == "Configured subreddits":
-        subs_input = st.text_area("Subreddits (comma-separated)", value=",".join(default_subs))
-        reddit_subs = [s.strip() for s in subs_input.split(",") if s.strip()]
-    else:
-        reddit_subs = None
+    reddit_mode = st.radio("Reddit fetch mode", ("Search r/all for keyword"))
+    # if reddit_mode == "Configured subreddits":
+    #     subs_input = st.text_area("Subreddits (comma-separated)", value=",".join(default_subs))
+    #     reddit_subs = [s.strip() for s in subs_input.split(",") if s.strip()]
+    # else:
+    #     reddit_subs = None
 
     st.markdown("---")
     st.markdown("Manual actions")
@@ -473,7 +473,7 @@ if analyze_button and keyword_input:
                 include_reddit=reddit_enabled_ui,
                 reddit_post_limit=int(reddit_post_limit),
                 reddit_comment_limit=int(reddit_comment_limit),
-                reddit_subs=reddit_subs,
+                # reddit_subs=reddit_subs,
                 reddit_search_mode=(reddit_mode == "Search r/all for keyword")
             )
         except Exception as e:
@@ -569,7 +569,7 @@ if analyze_button and keyword_input:
                 try:
                     rdf = df[df["source"] == "reddit"].copy()
                     rdf = _ensure_timestamp_col(rdf)
-                    rdf_nonull = rdf.dropna(subset=["comment_published_at"])
+                    rdf_nonull = rdf.dropna(subset=["created_utc", "comment_published_at"])
                     if rdf_nonull.empty:
                         st.info("No Reddit timestamps available to plot trends.")
                     else:
@@ -670,7 +670,7 @@ if fetch_now:
                     keyword_input,
                     post_limit=int(reddit_post_limit),
                     comment_limit=int(reddit_comment_limit),
-                    subs=reddit_subs,
+                    # subs=reddit_subs,
                     search_mode=(reddit_mode == "Search r/all for keyword"),
                     status_callback=lambda s: status.text(s)
                 )

@@ -75,7 +75,7 @@ class RedditCollector:
                     "comment_id": comment.id,
                     "body": comment.body,
                     "score": comment.score,
-                    "created_utc": datetime.fromtimestamp(comment.created_utc),
+                    "created_utc": datetime.fromtimestamp(comment.comment_published_at),
                     "author": str(comment.author) if comment.author else "[deleted]",
                     "parent_id": comment.parent_id,
                     "submission_id": comment.submission.id,
