@@ -601,6 +601,96 @@ if analyze_button and keyword_input:
                     else:
                         st.info("No English Reddit comments to show.")
 
+            # -------------------- Sentiment Heatmap (Combined) --------------------
+            st.subheader("📌 Sentiment Heatmap — YouTube + Reddit")
+            try:
+                # Filter out non-English (because sentiment for them is N/A)
+                df_sent = df[df["sentiment"] != "N/A (Non-English)"].copy()
+
+                if df_sent.empty:
+                    st.info("No English comments for heatmap.")
+                else:
+                    # Create pivot for heatmap
+                    pivot_df = (
+                        df_sent.pivot_table(
+                            index="sentiment",
+                            columns="source",
+                            values="comment_text",
+                            aggfunc="count",
+                            fill_value=0
+                        )
+                        .reset_index()
+                    )
+
+                    # Convert pivoted table to long format for Plotly heatmap
+                    heatmap_data = pivot_df.set_index("sentiment")
+
+                    fig_heatmap = px.imshow(
+                        heatmap_data,
+                        text_auto=True,
+                        aspect="auto",
+                        labels=dict(x="Source", y="Sentiment", color="Count"),
+                        title="Sentiment Distribution Heatmap (YouTube + Reddit)"
+                    )
+
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Could not render sentiment heatmap: {e}")
+
+            # ----- Sentiment Trend Over Time -----
+            st.subheader("Sentiment Trend Over Time (English Only)")
+            try:
+                df_sent = df[df["sentiment"] != "N/A (Non-English)"].copy()
+                df_sent = _ensure_timestamp_col(df_sent)
+                # If date column conversion fails, guard it
+                if "comment_published_at" in df_sent.columns:
+                    df_sent["date"] = df_sent["comment_published_at"].dt.date
+                else:
+                    df_sent["date"] = pd.NaT
+
+                sent_timeline = (
+                    df_sent.groupby(["date", "sentiment"])
+                    .size()
+                    .reset_index(name="count")
+                )
+
+                if not sent_timeline.empty:
+                    fig_sent_time = px.line(
+                        sent_timeline,
+                        x="date",
+                        y="count",
+                        color="sentiment",
+                        markers=True,
+                        title="Sentiment Trend Over Time"
+                    )
+                    st.plotly_chart(fig_sent_time, use_container_width=True)
+                else:
+                    st.info("No sentiment timeline data available.")
+            except Exception as e:
+                st.info("Could not plot sentiment trend over time: " + str(e))
+
+            # ----- Top Keywords (word frequency) -----
+            st.subheader("Top Keywords (Word Frequency)")
+            try:
+                from collections import Counter
+
+                words = " ".join(df["cleaned_text"].astype(str)).split()
+                freq = Counter(words).most_common(20)
+                freq_df = pd.DataFrame(freq, columns=["word", "count"])
+
+                fig_kw_bar = px.bar(
+                    freq_df,
+                    x="word",
+                    y="count",
+                    title="Top 20 Words in Cleaned Text",
+                    text="count"
+                )
+                st.plotly_chart(fig_kw_bar, use_container_width=True)
+
+            except Exception as e:
+                st.info("Could not compute top keywords: " + str(e))
+
         # Trends & Top Content
         with tab2:
             st.subheader("Comment Activity Over Time (Combined & Per Source)")
@@ -656,6 +746,86 @@ if analyze_button and keyword_input:
                 except Exception as e:
                     st.info("Reddit trends failed: " + str(e))
 
+            # ---------- New: Side-by-side small line graphs above Top Content ----------
+            st.markdown("---")
+            st.subheader("Small Trend Comparison (Recent)")
+            try:
+                # Use last N days window (e.g., 30 days) for small charts
+                days_window = 30
+                # prepare combined daily
+                df_days = _ensure_timestamp_col(df.copy()).dropna(subset=["comment_published_at"]).copy()
+                if not df_days.empty:
+                    df_days["date"] = df_days["comment_published_at"].dt.date
+                    comb_daily = df_days.groupby("date").size().reset_index(name="count")
+                else:
+                    comb_daily = pd.DataFrame(columns=["date", "count"])
+
+                # youtube daily
+                ydf_days = df[df["source"] == "youtube"].copy()
+                ydf_days = _ensure_timestamp_col(ydf_days).dropna(subset=["comment_published_at"]).copy()
+                if not ydf_days.empty:
+                    ydf_days["date"] = ydf_days["comment_published_at"].dt.date
+                    y_daily = ydf_days.groupby("date").size().reset_index(name="count")
+                else:
+                    y_daily = pd.DataFrame(columns=["date", "count"])
+
+                # reddit daily
+                rdf_days = df[df["source"] == "reddit"].copy()
+                rdf_days = _ensure_timestamp_col(rdf_days).dropna(subset=["comment_published_at"]).copy()
+                if not rdf_days.empty:
+                    rdf_days["date"] = rdf_days["comment_published_at"].dt.date
+                    r_daily = rdf_days.groupby("date").size().reset_index(name="count")
+                else:
+                    r_daily = pd.DataFrame(columns=["date", "count"])
+
+                # restrict to recent window if possible
+                if not comb_daily.empty:
+                    max_date = comb_daily["date"].max()
+                elif not y_daily.empty:
+                    max_date = y_daily["date"].max()
+                elif not r_daily.empty:
+                    max_date = r_daily["date"].max()
+                else:
+                    max_date = None
+
+                if max_date is not None:
+                    import datetime as _dt
+                    min_date = max_date - _dt.timedelta(days=days_window)
+                    if not comb_daily.empty:
+                        comb_daily = comb_daily[comb_daily["date"] >= min_date]
+                    if not y_daily.empty:
+                        y_daily = y_daily[y_daily["date"] >= min_date]
+                    if not r_daily.empty:
+                        r_daily = r_daily[r_daily["date"] >= min_date]
+
+                scol1, scol2, scol3 = st.columns(3)
+                with scol1:
+                    st.markdown("**Combined (last 30 days)**")
+                    if not comb_daily.empty:
+                        fig_c_small = px.line(comb_daily, x="date", y="count", title="", markers=True)
+                        fig_c_small.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=250)
+                        st.plotly_chart(fig_c_small, use_container_width=True)
+                    else:
+                        st.info("No combined data for small chart.")
+                with scol2:
+                    st.markdown("**YouTube (last 30 days)**")
+                    if not y_daily.empty:
+                        fig_y_small = px.line(y_daily, x="date", y="count", title="", markers=True)
+                        fig_y_small.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=250)
+                        st.plotly_chart(fig_y_small, use_container_width=True)
+                    else:
+                        st.info("No YouTube data for small chart.")
+                with scol3:
+                    st.markdown("**Reddit (last 30 days)**")
+                    if not r_daily.empty:
+                        fig_r_small = px.line(r_daily, x="date", y="count", title="", markers=True)
+                        fig_r_small.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=250)
+                        st.plotly_chart(fig_r_small, use_container_width=True)
+                    else:
+                        st.info("No Reddit data for small chart.")
+            except Exception as e:
+                st.info("Could not generate small trend comparison: " + str(e))
+
             st.subheader("Top Content (YouTube videos + Reddit posts)")
             try:
                 posts = []
@@ -677,6 +847,34 @@ if analyze_button and keyword_input:
                 st.dataframe(posts_df.fillna(""))
             except Exception as e:
                 st.info("Could not compute combined top content: " + str(e))
+
+            # ----- Keyword Mention Timeline -----
+            st.subheader("Keyword Mentions Over Time")
+            try:
+                df_mentions = df.copy()
+                df_mentions = _ensure_timestamp_col(df_mentions)
+                df_mentions = df_mentions.dropna(subset=["comment_published_at"])
+
+                # Count rows (comments/posts) per day per source
+                timeline = (
+                    df_mentions.groupby([df_mentions["comment_published_at"].dt.date, "source"])
+                    .size()
+                    .reset_index(name="mentions")
+                    .rename(columns={"comment_published_at": "date"})
+                )
+
+                fig_kw = px.line(
+                    timeline,
+                    x="date",
+                    y="mentions",
+                    color="source",
+                    markers=True,
+                    title="Daily Keyword Mentions (YouTube vs Reddit)"
+                )
+                st.plotly_chart(fig_kw, use_container_width=True)
+
+            except Exception as e:
+                st.info("Keyword mention timeline could not be generated: " + str(e))
 
         # Top channels & subreddits
         with tab3:
@@ -705,7 +903,54 @@ if analyze_button and keyword_input:
                 st.dataframe(ch_df)
             else:
                 st.info("No channel/subreddit metrics available.")
+            # ----- Engagement Distribution -----
+            st.subheader("View Count vs Like Count (YouTube Video Engagement)")
 
+            try:
+                ydf = df[df["source"] == "youtube"]
+                if not ydf.empty and "view_count" in ydf.columns and "like_count" in ydf.columns:
+                    fig_eng = px.scatter(
+                        ydf,
+                        x="view_count",
+                        y="like_count",
+                        color="channel_title",
+                        hover_data=["video_title"],
+                        title="Engagement Distribution: Views vs Likes",
+                    )
+                    st.plotly_chart(fig_eng, use_container_width=True)
+                else:
+                    st.info("YouTube data not sufficient for engagement plot.")
+
+            except Exception as e:
+                st.info("Could not generate engagement scatter: " + str(e))
+
+            # ----- Channel Performance Radar Chart -----
+            st.subheader("Channel Performance Radar (Top 5 Channels)")
+
+            try:
+                from src.analysis.influencers import get_top_channels
+                top_ch = get_top_channels(df[df["source"]=="youtube"], top_n=5)
+
+                if not top_ch.empty:
+                    radar_df = top_ch.melt(id_vars="channel_title",
+                                        value_vars=["total_views", "total_likes", "comments_in_sample", "engagement_score"],
+                                        var_name="metric",
+                                        value_name="value")
+
+                    fig_radar = px.line_polar(
+                        radar_df,
+                        r="value",
+                        theta="metric",
+                        color="channel_title",
+                        line_close=True,
+                        title="Top 5 Channels – Performance Radar"
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
+                else:
+                    st.info("Channel performance data not available.")
+
+            except Exception as e:
+                st.info("Could not generate radar chart: " + str(e))
         # Raw data
         with tab4:
             st.subheader("Processed Comment Data (YouTube + Reddit live)")
