@@ -1,17 +1,41 @@
-version: '3.8'
+version: "3.13"
+
 services:
   app:
     build: .
-    ports: ["8501:8501"]
-    volumes: [".:/app"]
-    depends_on: [mongo]
+    container_name: trendpulse_app
+    restart: always
+    ports:
+      - "8501:8501"
+    depends_on:
+      - mongo
     environment:
-      - MONGO_URI=mongodb://mongo:27017/
-      - MONGO_DB_NAME=trendpulse_db
-      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY} # Pass key from .env file if needed
+      # MongoDB connection
+      MONGO_URI: "mongodb://mongo:27017/"
+      MONGO_DB_NAME: "trendpulse_youtube_db"
+
+      # YouTube API Key (override using .env)
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY}
+
+      # Reddit credentials
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT}
+
+      # Reddit toggle
+      REDDIT_ENABLED: ${REDDIT_ENABLED:-True}
+
+    volumes:
+      - .:/app
+
   mongo:
     image: mongo:latest
-    ports: ["27017:27017"]
-    volumes: [mongodb_data:/data/db]
+    container_name: trendpulse_mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
 volumes:
   mongodb_data:
