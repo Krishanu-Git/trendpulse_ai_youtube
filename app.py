@@ -510,8 +510,8 @@ st.title("📺 TrendPulse AI: Multilingual YouTube + Reddit Analytics")
 
 with st.sidebar:
     st.header("⚙️ Controls")
-    # Prefilled keyword set to "terrorist" as requested
-    keyword_input = st.text_input("Enter Search Keyword", value="terrorist")
+    # Prefilled keyword set to "nvidia" as requested
+    keyword_input = st.text_input("Enter Search Keyword", value="nvidia")
     # YouTube defaults as per screenshot
     video_limit = st.slider("Videos to Scan (YouTube)", 5, 50, 10)
     comment_limit = st.slider("Comments per Video (YouTube)", 10, 100, 20)
