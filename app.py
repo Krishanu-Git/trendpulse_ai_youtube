@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from langdetect import detect, LangDetectException
 import traceback
 import re
+import logging
 
 # Project modules
 from src.data_collection.collector import YouTubeCollector
@@ -17,7 +18,10 @@ from src.analysis.sentiment import get_sentiment
 from src.analysis.trends import get_trends_over_time
 import config
 
-st.set_page_config(page_title="TrendPulse AI: YouTube + Reddit", layout="wide", page_icon="📺")
+# simple logging to console
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+st.set_page_config(page_title="TrendPulse AI: YouTube + Reddit", layout="wide", page_icon="📺", initial_sidebar_state="expanded")
 
 
 def detect_language(text):
@@ -69,40 +73,83 @@ def safe_concat_rows(frames):
         return pd.concat(reindexed, ignore_index=True, sort=False)
 
 
+def _find_best_time_column(df: pd.DataFrame):
+    """
+    Return the best-matching column name in df to use as timestamp.
+    Preference order: exact known names, then any column containing key words.
+    """
+    if df is None or df.empty:
+        return None
+
+    preferred = ["comment_published_at", "publishedAt", "published_at", "created_utc", "created_at", "created", "comment_published", "comment_publishedAt", "utc_datetime", "comment_date", "timestamp"]
+    cols_lower = {c: c.lower() for c in df.columns}
+
+    # exact/preferred matches (case-insensitive)
+    for p in preferred:
+        for orig, low in cols_lower.items():
+            if low == p.lower():
+                return orig
+
+    # fallback: any column that contains these tokens
+    tokens = ["created", "utc", "published", "time", "date", "timestamp"]
+    for token in tokens:
+        for orig, low in cols_lower.items():
+            if token in low:
+                return orig
+
+    return None
+
+
 def _ensure_timestamp_col(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Robust timestamp detection:
+    - look for exact known names, else search by tokens in column names
+    - coerce values to datetime (errors -> NaT)
+    - returns df with 'comment_published_at' column (datetime64[ns, UTC if tz present])
+    """
     if df is None or df.empty:
         return df
     df = df.copy()
-    candidates = [
-        "comment_published_at", "publishedAt", "published_at", "created_utc", "created_at",
-        "created", "comment_published", "comment_publishedAt", "utc_datetime"
-    ]
-    found = None
-    for c in candidates:
-        if c in df.columns:
-            found = c
-            break
-    if found:
+    best = _find_best_time_column(df)
+    if best:
         try:
-            df["comment_published_at"] = pd.to_datetime(df[found], errors="coerce")
-        except Exception:
-            df["comment_published_at"] = pd.to_datetime(df[found].astype(str), errors="coerce")
+            # convert with pandas (handles ISO strings and epoch numbers)
+            df["comment_published_at"] = pd.to_datetime(df[best], errors="coerce", utc=True)
+            logging.info(f"_ensure_timestamp_col: using column '{best}' for timestamps (converted).")
+        except Exception as e:
+            logging.warning(f"_ensure_timestamp_col: conversion using '{best}' failed: {e}; trying string coercion.")
+            try:
+                df["comment_published_at"] = pd.to_datetime(df[best].astype(str), errors="coerce", utc=True)
+                logging.info(f"_ensure_timestamp_col: conversion using '{best}' (string) succeeded.")
+            except Exception as e2:
+                logging.error(f"_ensure_timestamp_col: final conversion failed for '{best}': {e2}")
+                df["comment_published_at"] = pd.to_datetime(pd.Series([pd.NaT] * len(df)))
     else:
+        logging.info("_ensure_timestamp_col: no timestamp-like column found; creating empty NaT column.")
         df["comment_published_at"] = pd.to_datetime(pd.Series([pd.NaT] * len(df)))
     return df
 
 
 # ---------------- reddit normalization ----------------
 def _normalize_reddit_posts(posts_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize columns for reddit posts DataFrame coming from the collector.
+    Prefer keeping any provided created_utc/created_at/created rather than overwriting.
+    """
     if posts_df is None or posts_df.empty:
         return pd.DataFrame()
     df = posts_df.copy()
     df["id"] = df.get("id")
     df["title"] = df.get("title", "")
     df["selftext"] = df.get("selftext", df.get("self_text", ""))
+    # subreddit variants
     df["subreddit"] = df.get("subreddit", df.get("subreddit_name_prefixed", df.get("subreddit", None)))
     df["permalink"] = df.get("permalink", df.get("url", None))
-    df["created_utc"] = df.get("comment_published_at", df.get("created_at", df.get("created", None)))
+    # Keep any existing timestamp fields if provided by the collector: prefer created_utc -> created_at -> created -> comment_published_at
+    df["created_utc"] = df.get("created_utc",
+                               df.get("created_at",
+                                      df.get("created",
+                                             df.get("comment_published_at", None))))
     df["author"] = df.get("author", None)
     df["score"] = df.get("score", df.get("ups", None))
     df["num_comments"] = df.get("num_comments", df.get("num_comments", None))
@@ -110,16 +157,25 @@ def _normalize_reddit_posts(posts_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_reddit_comments(comments_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize reddit comments DataFrame.
+    Preserve created_utc / created_at / created when present.
+    """
     if comments_df is None or comments_df.empty:
         return pd.DataFrame()
     df = comments_df.copy()
+    # map comment text
     if "body" in df.columns:
         df["comment_text"] = df["body"]
     elif "text" in df.columns:
         df["comment_text"] = df["text"]
     else:
         df["comment_text"] = df.get("selftext", df.get("comment_text", ""))
-    df["created_utc"] = df.get("comment_published_at", df.get("created_at", df.get("created", None)))
+    # Preserve timestamps if provided
+    df["created_utc"] = df.get("created_utc",
+                               df.get("created_at",
+                                      df.get("created",
+                                             df.get("comment_published_at", None))))
     df["submission_id"] = df.get("submission_id", df.get("link_id", df.get("post_id", None)))
     df["id"] = df.get("id")
     df["parent_id"] = df.get("parent_id")
@@ -241,7 +297,7 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
     try:
         yt_df = dbh.find_data_by_keyword(keyword)
     except Exception as e:
-        print("db find_data_by_keyword failed:", e)
+        logging.warning("db find_data_by_keyword failed: %s", e)
         yt_df = pd.DataFrame()
     if yt_df is None:
         yt_df = pd.DataFrame()
@@ -260,7 +316,7 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
                 except Exception:
                     yt_df = fetched.copy()
         except Exception as e:
-            print("YouTube fetch failed:", e)
+            logging.warning("YouTube fetch failed: %s", e)
             yt_df = pd.DataFrame()
 
     if not yt_df.empty:
@@ -288,10 +344,10 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
                 comment_limit=reddit_comment_limit,
                 subs=reddit_subs,
                 search_mode=reddit_search_mode,
-                status_callback=lambda s: print("REDDIT_FETCH:", s)
+                status_callback=lambda s: logging.info("REDDIT_FETCH: %s", s)
             )
         except Exception as e:
-            print("Live reddit fetch failed:", e)
+            logging.warning("Live reddit fetch failed: %s", e)
             posts_df, comments_df = pd.DataFrame(), pd.DataFrame()
 
         posts_df = ensure_unique_columns(posts_df) if not posts_df.empty else pd.DataFrame()
@@ -302,6 +358,7 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
         reddit_post_rows = pd.DataFrame()
 
         if not comments_df.empty:
+            # rename created_utc -> comment_published_at, id -> comment_id
             comments_df = comments_df.rename(columns={"comment_text": "comment_text", "created_utc": "comment_published_at", "id": "comment_id"})
             comments_df["source"] = "reddit"
             comments_df["origin"] = "reddit_live_fetch"
@@ -309,13 +366,27 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
             comments_df["language"] = comments_df["comment_text"].apply(lambda t: detect_language(t) if t else "unknown")
             comments_df["cleaned_text"] = comments_df.apply(lambda r: clean_text_multilingual(r["comment_text"], r["language"]), axis=1)
             comments_df["sentiment"] = comments_df.apply(lambda r: get_sentiment(r["cleaned_text"]) if r["language"] == "en" else "N/A (Non-English)", axis=1)
+            # Use robust timestamp detection
             comments_df = _ensure_timestamp_col(comments_df)
             reddit_comment_rows = comments_df
 
         if not posts_df.empty:
             temp = posts_df.copy()
             temp["comment_text"] = temp.get("selftext", "").fillna("") + " " + temp.get("title", "").fillna("")
-            temp["comment_published_at"] = temp.get("comment_published_at")
+            # Prefer created_utc then created_at then created then comment_published_at
+            if "created_utc" in temp.columns and temp["created_utc"].notna().any():
+                temp["comment_published_at"] = temp["created_utc"]
+            elif "created_at" in temp.columns and temp["created_at"].notna().any():
+                temp["comment_published_at"] = temp["created_at"]
+            elif "created" in temp.columns and temp["created"].notna().any():
+                temp["comment_published_at"] = temp["created"]
+            else:
+                # fallback: try to detect any time-like column using our helper
+                best = _find_best_time_column(temp)
+                if best:
+                    temp["comment_published_at"] = temp[best]
+                else:
+                    temp["comment_published_at"] = None
             temp["language"] = temp["comment_text"].apply(lambda t: detect_language(t) if t else "unknown")
             temp["cleaned_text"] = temp.apply(lambda r: clean_text_multilingual(r["comment_text"], r["language"]), axis=1)
             temp["sentiment"] = temp.apply(lambda r: get_sentiment(r["cleaned_text"]) if r["language"] == "en" else "N/A (Non-English)", axis=1)
@@ -325,6 +396,8 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
             # create a pseudo comment_id for posts to satisfy db_handler expectations and to allow dedupe
             if "comment_id" not in temp.columns:
                 temp["comment_id"] = None
+            # ensure proper timestamp conversion
+            temp = _ensure_timestamp_col(temp)
             reddit_post_rows = temp
 
         # Now unify comments + posts rows for analysis
@@ -356,19 +429,18 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
                 if not new_posts.empty:
                     try:
                         dbh.insert_data(new_posts)
-                        print(f"Inserted/Updated {len(new_posts)} reddit posts via db_handler.insert_data().")
+                        logging.info("Inserted/Updated %d reddit posts via db_handler.insert_data().", len(new_posts))
                     except Exception as e:
-                        print("High-level insert posts failed, trying raw insert:", e)
+                        logging.warning("High-level insert posts failed, trying raw insert: %s", e)
                         try:
                             if collection is not None:
                                 collection.insert_many(new_posts.to_dict(orient="records"))
-                                print(f"Raw inserted {len(new_posts)} reddit posts.")
+                                logging.info("Raw inserted %d reddit posts.", len(new_posts))
                             else:
-                                # fallback: attempt dbh.insert_data with dataframe again
                                 dbh.insert_data(new_posts)
-                                print(f"Inserted (fallback) {len(new_posts)} reddit posts.")
+                                logging.info("Inserted (fallback) %d reddit posts.", len(new_posts))
                         except Exception as e2:
-                            print("Raw insert posts also failed:", e2)
+                            logging.error("Raw insert posts also failed: %s", e2)
 
             # Insert comments
             if not comments_df.empty:
@@ -388,27 +460,27 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
                 if not new_comments.empty:
                     try:
                         dbh.insert_data(new_comments)
-                        print(f"Inserted/Updated {len(new_comments)} reddit comments via db_handler.insert_data().")
+                        logging.info("Inserted/Updated %d reddit comments via db_handler.insert_data().", len(new_comments))
                     except Exception as e:
-                        print("High-level insert comments failed, trying raw insert:", e)
+                        logging.warning("High-level insert comments failed, trying raw insert. Error: %s", e)
                         try:
                             if collection is not None:
                                 collection.insert_many(new_comments.to_dict(orient="records"))
-                                print(f"Raw inserted {len(new_comments)} reddit comments.")
+                                logging.info("Raw inserted %d reddit comments.", len(new_comments))
                             else:
                                 dbh.insert_data(new_comments)
-                                print(f"Inserted (fallback) {len(new_comments)} reddit comments.")
+                                logging.info("Inserted (fallback) %d reddit comments.", len(new_comments))
                         except Exception as e2:
-                            print("Raw insert comments also failed:", e2)
+                            logging.error("Raw insert comments also failed: %s", e2)
         except Exception as e:
-            print("Inserting fetched reddit data into DB failed:", e)
+            logging.error("Inserting fetched reddit data into DB failed: %s", e)
 
         # Merge reddit_live_df into combined safely
         try:
             if reddit_live_df is not None and not reddit_live_df.empty:
                 combined = safe_concat_rows([combined, reddit_live_df]) if (combined is not None and not combined.empty) else reddit_live_df.copy()
         except Exception as e:
-            print("Merge (concat) of reddit live into combined failed:", e)
+            logging.error("Merge (concat) of reddit live into combined failed: %s", e)
             try:
                 if reddit_live_df is not None and not reddit_live_df.empty and combined is not None and not combined.empty:
                     common = [c for c in combined.columns if c in reddit_live_df.columns]
@@ -417,12 +489,14 @@ def load_and_process_data(keyword, video_limit, comment_limit, include_reddit=Fa
                     else:
                         combined = safe_concat_rows([combined, reddit_live_df])
             except Exception as e2:
-                print("Fallback merge also failed:", e2)
+                logging.error("Fallback merge also failed: %s", e2)
 
     if combined is None or (isinstance(combined, pd.DataFrame) and combined.empty):
         return None
 
+    # final robust timestamp handling for the merged combined DF
     combined = _ensure_timestamp_col(combined)
+
     if "cleaned_text" not in combined.columns:
         combined["language"] = combined["comment_text"].apply(lambda t: detect_language(t) if t else "unknown")
         combined["cleaned_text"] = combined.apply(lambda r: clean_text_multilingual(r["comment_text"], r["language"]), axis=1)
@@ -436,7 +510,9 @@ st.title("📺 TrendPulse AI: Multilingual YouTube + Reddit Analytics")
 
 with st.sidebar:
     st.header("⚙️ Controls")
-    keyword_input = st.text_input("Enter Search Keyword", value="Nvidia")
+    # Prefilled keyword set to "terrorist" as requested
+    keyword_input = st.text_input("Enter Search Keyword", value="terrorist")
+    # YouTube defaults as per screenshot
     video_limit = st.slider("Videos to Scan (YouTube)", 5, 50, 10)
     comment_limit = st.slider("Comments per Video (YouTube)", 10, 100, 20)
     analyze_button = st.button("Analyze Trends", type="primary")
@@ -444,19 +520,17 @@ with st.sidebar:
 with st.sidebar:
     st.markdown("---")
     st.subheader("🔗 Reddit Controls (live fetch)")
-    default_enabled = getattr(config, "REDDIT_ENABLED", False)
-    default_post_limit = getattr(config, "REDDIT_POST_LIMIT", 30)
-    # default_subs = getattr(config, "REDDIT_SUBREDDITS", ["technology"])
+    # Force default UI to show Reddit enabled by default
+    default_enabled = True
+    default_post_limit = 500
+    default_comment_limit = 100
 
     reddit_enabled_ui = st.checkbox("Enable Reddit (override config)", value=default_enabled)
-    reddit_post_limit = st.number_input("Reddit posts to fetch per subreddit/search", min_value=1, max_value=500, value=default_post_limit, step=1)
-    reddit_comment_limit = st.number_input("Comments per reddit post to fetch", min_value=1, max_value=500, value=100, step=1)
-    reddit_mode = st.radio("Reddit fetch mode", ("Search r/all for keyword"))
-    # if reddit_mode == "Configured subreddits":
-    #     subs_input = st.text_area("Subreddits (comma-separated)", value=",".join(default_subs))
-    #     reddit_subs = [s.strip() for s in subs_input.split(",") if s.strip()]
-    # else:
-    #     reddit_subs = None
+    reddit_post_limit = st.number_input("Reddit posts to fetch per subreddit/search", min_value=1, max_value=2000, value=default_post_limit, step=1)
+    reddit_comment_limit = st.number_input("Comments per reddit post to fetch", min_value=1, max_value=1000, value=default_comment_limit, step=1)
+
+    # reddit_mode is fixed to Search r/all for keyword; no configured-subreddits option
+    reddit_subs = None
 
     st.markdown("---")
     st.markdown("Manual actions")
@@ -473,8 +547,8 @@ if analyze_button and keyword_input:
                 include_reddit=reddit_enabled_ui,
                 reddit_post_limit=int(reddit_post_limit),
                 reddit_comment_limit=int(reddit_comment_limit),
-                # reddit_subs=reddit_subs,
-                reddit_search_mode=(reddit_mode == "Search r/all for keyword")
+                reddit_subs=reddit_subs,
+                reddit_search_mode=True  # always search r/all for keyword
             )
         except Exception as e:
             st.error(f"Data loading failed: {e}")
@@ -527,6 +601,96 @@ if analyze_button and keyword_input:
                     else:
                         st.info("No English Reddit comments to show.")
 
+            # -------------------- Sentiment Heatmap (Combined) --------------------
+            st.subheader("📌 Sentiment Heatmap — YouTube + Reddit")
+            try:
+                # Filter out non-English (because sentiment for them is N/A)
+                df_sent = df[df["sentiment"] != "N/A (Non-English)"].copy()
+
+                if df_sent.empty:
+                    st.info("No English comments for heatmap.")
+                else:
+                    # Create pivot for heatmap
+                    pivot_df = (
+                        df_sent.pivot_table(
+                            index="sentiment",
+                            columns="source",
+                            values="comment_text",
+                            aggfunc="count",
+                            fill_value=0
+                        )
+                        .reset_index()
+                    )
+
+                    # Convert pivoted table to long format for Plotly heatmap
+                    heatmap_data = pivot_df.set_index("sentiment")
+
+                    fig_heatmap = px.imshow(
+                        heatmap_data,
+                        text_auto=True,
+                        aspect="auto",
+                        labels=dict(x="Source", y="Sentiment", color="Count"),
+                        title="Sentiment Distribution Heatmap (YouTube + Reddit)"
+                    )
+
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Could not render sentiment heatmap: {e}")
+
+            # ----- Sentiment Trend Over Time -----
+            st.subheader("Sentiment Trend Over Time (English Only)")
+            try:
+                df_sent = df[df["sentiment"] != "N/A (Non-English)"].copy()
+                df_sent = _ensure_timestamp_col(df_sent)
+                # If date column conversion fails, guard it
+                if "comment_published_at" in df_sent.columns:
+                    df_sent["date"] = df_sent["comment_published_at"].dt.date
+                else:
+                    df_sent["date"] = pd.NaT
+
+                sent_timeline = (
+                    df_sent.groupby(["date", "sentiment"])
+                    .size()
+                    .reset_index(name="count")
+                )
+
+                if not sent_timeline.empty:
+                    fig_sent_time = px.line(
+                        sent_timeline,
+                        x="date",
+                        y="count",
+                        color="sentiment",
+                        markers=True,
+                        title="Sentiment Trend Over Time"
+                    )
+                    st.plotly_chart(fig_sent_time, use_container_width=True)
+                else:
+                    st.info("No sentiment timeline data available.")
+            except Exception as e:
+                st.info("Could not plot sentiment trend over time: " + str(e))
+
+            # ----- Top Keywords (word frequency) -----
+            st.subheader("Top Keywords (Word Frequency)")
+            try:
+                from collections import Counter
+
+                words = " ".join(df["cleaned_text"].astype(str)).split()
+                freq = Counter(words).most_common(20)
+                freq_df = pd.DataFrame(freq, columns=["word", "count"])
+
+                fig_kw_bar = px.bar(
+                    freq_df,
+                    x="word",
+                    y="count",
+                    title="Top 20 Words in Cleaned Text",
+                    text="count"
+                )
+                st.plotly_chart(fig_kw_bar, use_container_width=True)
+
+            except Exception as e:
+                st.info("Could not compute top keywords: " + str(e))
+
         # Trends & Top Content
         with tab2:
             st.subheader("Comment Activity Over Time (Combined & Per Source)")
@@ -536,12 +700,17 @@ if analyze_button and keyword_input:
                 if df_tr_nonull.empty:
                     st.info("Combined trend not available: no valid timestamps in combined data.")
                 else:
+                    # Keep existing behavior: try get_trends_over_time then fallback to daily aggregation
                     combined_trends = get_trends_over_time(df_tr_nonull)
-                    if combined_trends is not None and not combined_trends.empty:
-                        fig_comb = px.line(combined_trends, x="comment_published_at", y="count", title="Combined Comment Volume per Day")
-                        st.plotly_chart(fig_comb, use_container_width=True)
-                    else:
-                        st.info("Combined trend calculation returned no rows.")
+                    if combined_trends is None or combined_trends.empty:
+                        # fallback to daily counts
+                        tmp = df_tr_nonull.copy()
+                        tmp["date"] = tmp["comment_published_at"].dt.date
+                        combined_trends = tmp.groupby("date").size().reset_index(name="count")
+                        # normalize column name to match expected x axis
+                        combined_trends = combined_trends.rename(columns={"date": "comment_published_at"})
+                    fig_comb = px.line(combined_trends, x="comment_published_at", y="count", title="Combined Comment Volume per Day", markers=True)
+                    st.plotly_chart(fig_comb, use_container_width=True)
             except Exception as e:
                 st.info("Combined trends unavailable: " + str(e))
 
@@ -556,11 +725,12 @@ if analyze_button and keyword_input:
                         st.info("No YouTube timestamps available to plot trends.")
                     else:
                         y_tr = get_trends_over_time(ydf_nonull)
-                        if y_tr is not None and not y_tr.empty:
-                            fig_y = px.line(y_tr, x="comment_published_at", y="count", title="YouTube")
-                            st.plotly_chart(fig_y, use_container_width=True)
-                        else:
-                            st.info("No YouTube trend data available.")
+                        if y_tr is None or y_tr.empty:
+                            tmp = ydf_nonull.copy()
+                            tmp["date"] = tmp["comment_published_at"].dt.date
+                            y_tr = tmp.groupby("date").size().reset_index(name="count").rename(columns={"date": "comment_published_at"})
+                        fig_y = px.line(y_tr, x="comment_published_at", y="count", title="YouTube", markers=True)
+                        st.plotly_chart(fig_y, use_container_width=True)
                 except Exception as e:
                     st.info("YouTube trends failed: " + str(e))
 
@@ -569,16 +739,17 @@ if analyze_button and keyword_input:
                 try:
                     rdf = df[df["source"] == "reddit"].copy()
                     rdf = _ensure_timestamp_col(rdf)
-                    rdf_nonull = rdf.dropna(subset=["created_utc", "comment_published_at"])
+                    rdf_nonull = rdf.dropna(subset=["comment_published_at"])
                     if rdf_nonull.empty:
                         st.info("No Reddit timestamps available to plot trends.")
                     else:
                         r_tr = get_trends_over_time(rdf_nonull)
-                        if r_tr is not None and not r_tr.empty:
-                            fig_r = px.line(r_tr, x="comment_published_at", y="count", title="Reddit")
-                            st.plotly_chart(fig_r, use_container_width=True)
-                        else:
-                            st.info("No Reddit trend data available.")
+                        if r_tr is None or r_tr.empty:
+                            tmp = rdf_nonull.copy()
+                            tmp["date"] = tmp["comment_published_at"].dt.date
+                            r_tr = tmp.groupby("date").size().reset_index(name="count").rename(columns={"date": "comment_published_at"})
+                        fig_r = px.line(r_tr, x="comment_published_at", y="count", title="Reddit", markers=True)
+                        st.plotly_chart(fig_r, use_container_width=True)
                 except Exception as e:
                     st.info("Reddit trends failed: " + str(e))
 
@@ -604,6 +775,34 @@ if analyze_button and keyword_input:
             except Exception as e:
                 st.info("Could not compute combined top content: " + str(e))
 
+            # ----- Keyword Mention Timeline -----
+            st.subheader("Keyword Mentions Over Time")
+            try:
+                df_mentions = df.copy()
+                df_mentions = _ensure_timestamp_col(df_mentions)
+                df_mentions = df_mentions.dropna(subset=["comment_published_at"])
+
+                # Count rows (comments/posts) per day per source
+                timeline = (
+                    df_mentions.groupby([df_mentions["comment_published_at"].dt.date, "source"])
+                    .size()
+                    .reset_index(name="mentions")
+                    .rename(columns={"comment_published_at": "date"})
+                )
+
+                fig_kw = px.line(
+                    timeline,
+                    x="date",
+                    y="mentions",
+                    color="source",
+                    markers=True,
+                    title="Daily Keyword Mentions (YouTube vs Reddit)"
+                )
+                st.plotly_chart(fig_kw, use_container_width=True)
+
+            except Exception as e:
+                st.info("Keyword mention timeline could not be generated: " + str(e))
+
         # Top channels & subreddits
         with tab3:
             st.subheader("Top Channels & Subreddits")
@@ -625,13 +824,60 @@ if analyze_button and keyword_input:
                     for _, r in sr_stats.sort_values("comments", ascending=False).head(30).iterrows():
                         rows.append({"name": r["subreddit"], "type": "reddit_subreddit", "videos_or_posts": int(r.get("posts", 0)) if pd.notna(r.get("posts", 0)) else 0, "total_comments": int(r["comments"])})
             except Exception as e:
-                print("Top channels calc failed:", e)
+                logging.warning("Top channels calc failed: %s", e)
             ch_df = pd.DataFrame(rows).sort_values("total_comments", ascending=False).head(50)
             if not ch_df.empty:
                 st.dataframe(ch_df)
             else:
                 st.info("No channel/subreddit metrics available.")
+            # ----- Engagement Distribution -----
+            st.subheader("View Count vs Like Count (YouTube Video Engagement)")
 
+            try:
+                ydf = df[df["source"] == "youtube"]
+                if not ydf.empty and "view_count" in ydf.columns and "like_count" in ydf.columns:
+                    fig_eng = px.scatter(
+                        ydf,
+                        x="view_count",
+                        y="like_count",
+                        color="channel_title",
+                        hover_data=["video_title"],
+                        title="Engagement Distribution: Views vs Likes",
+                    )
+                    st.plotly_chart(fig_eng, use_container_width=True)
+                else:
+                    st.info("YouTube data not sufficient for engagement plot.")
+
+            except Exception as e:
+                st.info("Could not generate engagement scatter: " + str(e))
+
+            # ----- Channel Performance Radar Chart -----
+            st.subheader("Channel Performance Radar (Top 5 Channels)")
+
+            try:
+                from src.analysis.influencers import get_top_channels
+                top_ch = get_top_channels(df[df["source"]=="youtube"], top_n=5)
+
+                if not top_ch.empty:
+                    radar_df = top_ch.melt(id_vars="channel_title",
+                                        value_vars=["total_views", "total_likes", "comments_in_sample", "engagement_score"],
+                                        var_name="metric",
+                                        value_name="value")
+
+                    fig_radar = px.line_polar(
+                        radar_df,
+                        r="value",
+                        theta="metric",
+                        color="channel_title",
+                        line_close=True,
+                        title="Top 5 Channels – Performance Radar"
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
+                else:
+                    st.info("Channel performance data not available.")
+
+            except Exception as e:
+                st.info("Could not generate radar chart: " + str(e))
         # Raw data
         with tab4:
             st.subheader("Processed Comment Data (YouTube + Reddit live)")
@@ -671,7 +917,7 @@ if fetch_now:
                     post_limit=int(reddit_post_limit),
                     comment_limit=int(reddit_comment_limit),
                     # subs=reddit_subs,
-                    search_mode=(reddit_mode == "Search r/all for keyword"),
+                    search_mode=True,  # always search r/all for keyword
                     status_callback=lambda s: status.text(s)
                 )
                 try:
